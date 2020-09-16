@@ -1,0 +1,7 @@
+{
+  "domain": "dlink_presence",
+  "name": "D-Link Presene",
+  "documentation": "https://www.home-assistant.io/integrations/#presence-detection",
+  "requirements": [],
+  "codeowners": ["@ayavilevich"]
+}
