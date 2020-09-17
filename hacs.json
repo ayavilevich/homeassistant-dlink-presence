@@ -1,3 +1,4 @@
 {
-	"name": "D-Link Presence / device_Tracker"
+	"name": "D-Link Presence / device_Tracker",
+	"render_readme": true
   }
