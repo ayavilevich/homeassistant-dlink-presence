@@ -116,7 +116,7 @@ CHANGE_TIME_CACHE_DEFAULT = 5  # Default 5s
 _IWLIST_CMD = 'iwlist {} ap'
 _IWLIST_REGEX = re.compile(
     r'(?P<mac>(([0-9A-F]{2}[:-]){5}([0-9A-F]{2})))' +
-    r' : Quality=')
+    r' : Quality[=:]')
 
 class DLinkTelnet:
     """This is the interface class."""
