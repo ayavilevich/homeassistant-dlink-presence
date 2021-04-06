@@ -4,5 +4,6 @@
   "documentation": "https://github.com/ayavilevich/homeassistant-dlink-presence",
   "issue_tracker": "https://github.com/ayavilevich/homeassistant-dlink-presence/issues",
   "requirements": [],
-  "codeowners": ["@ayavilevich"]
+  "codeowners": ["@ayavilevich"],
+  "version": "1.0.0"
 }
