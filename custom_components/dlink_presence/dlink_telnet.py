@@ -1,22 +1,25 @@
 # this is based on https://github.com/kennedyshead/aioasuswrt
 import asyncio
 import logging
-from asyncio import LimitOverrunError, TimeoutError
-import sys
+from asyncio import LimitOverrunError, TimeoutError, IncompleteReadError
+#import sys
 import inspect
 from collections import namedtuple
 from datetime import datetime
 import re
+from math import floor
 
 _LOGGER = logging.getLogger(__name__)
 
-# https://github.com/kennedyshead/aioasuswrt/blob/9585b2c78350593831d4b7af2f42c53a39d7484c/aioasuswrt/connection.py#L78
+# https://github.com/kennedyshead/aioasuswrt/blob/2820deaa3fc0ea78e2f73a2832f01db5dd2b6885/aioasuswrt/connection.py#L81
+# note, when updating, dlink prompt is "$", not "#" as with asus.
+# note, on dlink we didn't need the logic using "_PATH_EXPORT_COMMAND" from aioasuswrt
+# possibly improve the logic so it times-out when waiting on the server. Reference https://stackoverflow.com/questions/29756507/how-can-i-add-a-connection-timeout-with-asyncio
 class TelnetConnection:
     """Maintains a Telnet connection to a device with a shell."""
 
     def __init__(self, host, port, username, password):
         """Initialize the Telnet connection properties."""
-
         self._reader = None
         self._writer = None
         self._host = host
@@ -24,75 +27,131 @@ class TelnetConnection:
         self._username = username
         self._password = password
         self._prompt_string = None
-        self._connected = False
         self._io_lock = asyncio.Lock()
+        self._linebreak = None
 
     async def async_run_command(self, command, first_try=True):
-        """Run a command through a Telnet connection.
-        Connect to the Telnet server if not currently connected, otherwise
-        use the existing connection.
-        """
-        _LOGGER.debug("Pre async_connect.")
-        await self.async_connect()
-        _LOGGER.debug("Post async_connect.")
-        try:
-            with (await self._io_lock):
-                #self._writer.write('{}\n'.format(
-                #    "%s && %s" % (
-                #        _PATH_EXPORT_COMMAND, command)).encode('ascii'))
-                self._writer.write('{}\n'.format(command).encode('ascii'))
-                data = ((await asyncio.wait_for(self._reader.readuntil(
-                    self._prompt_string), 9)).split(b'\n')[1:-1])
+        """Run a command through a Telnet connection. If first_try is True a second
+        attempt will be done if the first try fails."""
 
-        except (BrokenPipeError, LimitOverrunError):
-            if first_try:
-                return await self.async_run_command(command, False)
-            else:
-                _LOGGER.warning("connection is lost to host.")
-                return[]
-        except TimeoutError:
-            _LOGGER.error("Host timeout.")
-            return []
-        finally:
-            self._writer.close()
+        #_LOGGER.debug("TelnetConnection.async_run_command")
 
-        return [line.decode('utf-8') for line in data]
+        need_retry = False
+
+        async with self._io_lock:
+            try:
+                if not self.is_connected:
+                    await self._async_connect()
+                # Let's add the path and send the command
+                #full_cmd = f"{_PATH_EXPORT_COMMAND} && {command}"
+                full_cmd = command
+                self._writer.write((full_cmd + "\n").encode("ascii"))
+                # And read back the data till the prompt string
+                data = await asyncio.wait_for(
+                    self._reader.readuntil(self._prompt_string), 9
+                )
+            except (BrokenPipeError, LimitOverrunError, IncompleteReadError):
+                # Writing has failed, Let's close and retry if necessary
+                self.disconnect()
+                if first_try:
+                    need_retry = True
+                else:
+                    _LOGGER.warning("connection is lost to host.")
+                    return []
+            except TimeoutError:
+                _LOGGER.error("Host timeout.")
+                self.disconnect()
+                if first_try:
+                    need_retry = True
+                else:
+                    return []
+
+        if need_retry:
+            _LOGGER.debug("Trying one more time")
+            return await self.async_run_command(command, False)
+
+        # Let's process the received data
+        data = data.split(b"\n")
+        # Let's find the number of elements the cmd takes
+        cmd_len = len(self._prompt_string) + len(full_cmd)
+        # We have to do floor + 1 to handle the infinite case correct
+        start_split = floor(cmd_len / self._linebreak) + 1
+        data = data[start_split:-1]
+        return [line.decode("utf-8", "ignore") for line in data]
 
     async def async_connect(self):
         """Connect to the ASUS-WRT Telnet server."""
+        async with self._io_lock:
+            await self._async_connect()
+
+    async def _async_connect(self):
+        #_LOGGER.debug("TelnetConnection._async_connect")
         self._reader, self._writer = await asyncio.open_connection(
-            self._host, self._port)
+            self._host, self._port
+        )
+        #_LOGGER.debug("TelnetConnection._async_connect after connect")
 
-        with (await self._io_lock):
-            try:
-                await asyncio.wait_for(self._reader.readuntil(b'login: '), 9)
-            except asyncio.streams.IncompleteReadError:
-                _LOGGER.error(
-                    "Unable to read from router on %s:%s" % (
-                        self._host, self._port))
-                return
-            except TimeoutError:
-                _LOGGER.error("Host timeout.")
-            self._writer.write((self._username + '\n').encode('ascii'))
-            await self._reader.readuntil(b'Password: ')
+        # Process the login
+        # Enter the Username
+        try:
+            await asyncio.wait_for(self._reader.readuntil(b"login: "), 9)
+        except asyncio.IncompleteReadError:
+            _LOGGER.error(
+                "Unable to read from router on %s:%s" % (self._host, self._port)
+            )
+            return
+        except TimeoutError:
+            _LOGGER.error("Host timeout.")
+            self.disconnect()
+        self._writer.write((self._username + "\n").encode("ascii"))
+        #_LOGGER.debug("TelnetConnection._async_connect after username")
 
-            self._writer.write((self._password + '\n').encode('ascii'))
+        # Enter the password
+        await self._reader.readuntil(b"Password: ")
+        self._writer.write((self._password + "\n").encode("ascii"))
+        #_LOGGER.debug("TelnetConnection._async_connect after password")
 
-            # read hello message
-            self._prompt_string = (await self._reader.readuntil(
-                b'$')).split(b'\n')[-1]
-            # self._prompt_string = b'$' # dlink's prompt should be fixed to $
-            _LOGGER.debug('Prompt %s' % (self._prompt_string))
-        self._connected = True
+        # Now we can determine the prompt string for the commands.
+        self._prompt_string = (await self._reader.readuntil(b"$")).split(b"\n")[-1]
+
+        # Let's determine if any linebreaks are added
+        # Write some arbitrary long string.
+        if self._linebreak is None:
+            self._writer.write((" " * 200 + "\n").encode("ascii"))
+            self._determine_linebreak(
+                await self._reader.readuntil(self._prompt_string)
+            )
+        #_LOGGER.debug("TelnetConnection._async_connect after prompt")
+
+    def _determine_linebreak(self, input_bytes: bytes):
+        """Telnet or asyncio seems to be adding linebreaks due to terminal size,
+        try to determine here what the column number is."""
+        # Let's convert the data to the expected format
+        data = input_bytes.decode("utf-8").replace("\r", "").split("\n")
+        if len(data) == 1:
+            # There was no split, so assume infinite
+            self._linebreak = float("inf")
+        else:
+            # The linebreak is the length of the prompt string + the first line
+            self._linebreak = len(self._prompt_string) + len(data[0])
+
+            if len(data) > 2:
+                # We can do a quick sanity check, as there are more linebreaks
+                if len(data[1]) != self._linebreak:
+                    _LOGGER.warning(
+                        f"Inconsistent linebreaks {len(data[1])} != "
+                        f"{self._linebreak}"
+                    )
 
     @property
     def is_connected(self):
         """Do we have a connection."""
-        return self._connected
+        return self._reader is not None and self._writer is not None
 
-    async def disconnect(self):
+    def disconnect(self):
         """Disconnects the client"""
-        self._writer.close()
+        self._writer = None
+        self._reader = None
 
 Device = namedtuple('Device', ['mac', 'ip', 'name'])
 
