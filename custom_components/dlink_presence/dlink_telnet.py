@@ -65,6 +65,11 @@ class TelnetConnection:
                     need_retry = True
                 else:
                     return []
+            except ConnectionError as e:
+                _LOGGER.error("ConnectionError.")
+                _LOGGER.error(e)
+                self.disconnect()
+                return []
 
         if need_retry:
             _LOGGER.debug("Trying one more time")
@@ -146,7 +151,7 @@ class TelnetConnection:
     @property
     def is_connected(self):
         """Do we have a connection."""
-        return self._reader is not None and self._writer is not None
+        return self._reader is not None and self._writer is not None and not self._writer.is_closing()
 
     def disconnect(self):
         """Disconnects the client"""
